@@ -61,19 +61,38 @@ export default function EmailCheckClient() {
     });
   };
 
-  const handleExportValid = () => {
-    if (!response?.results) return;
-    const valid = response.results
-      .filter((r) => r.status === "valid")
-      .map((r) => r.normalized)
-      .join("\n");
-    const blob = new Blob([valid], { type: "text/plain;charset=utf-8" });
+  const validEmails = useMemo(
+    () => response?.results?.filter((r) => r.status === "valid") ?? [],
+    [response]
+  );
+  const validCount = validEmails.length;
+
+  const downloadBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "emails-valides.txt";
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const timestamp = () =>
+    new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+
+  const handleExportTxt = () => {
+    if (validCount === 0) return;
+    const content = validEmails.map((r) => r.normalized).join("\n");
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    downloadBlob(blob, `emails-valides-${timestamp()}.txt`);
+  };
+
+  const handleExportCsv = () => {
+    if (validCount === 0) return;
+    const header = "email,status,suggestion";
+    const rows = validEmails.map((r) => `${r.normalized},${r.status},`);
+    const csv = "﻿" + [header, ...rows].join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    downloadBlob(blob, `emails-valides-${timestamp()}.csv`);
   };
 
   return (
@@ -130,21 +149,32 @@ export default function EmailCheckClient() {
             <Stat label="Génériques" value={response.summary.role_based} />
             <Stat label="Doublons" value={response.summary.duplicate} />
           </dl>
-          {response.summary.valid > 0 ? (
-            <button
-              type="button"
-              onClick={handleExportValid}
-              className="mt-4 rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm font-medium hover:bg-[color:var(--muted)]"
-            >
-              Exporter les adresses valides (.txt)
-            </button>
-          ) : null}
         </section>
       ) : null}
 
       {response?.results ? (
         <section>
-          <h2 className="text-lg font-semibold">Détails</h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">Détails</h2>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleExportTxt}
+                disabled={validCount === 0}
+                className="rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm font-medium hover:bg-[color:var(--muted)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                Télécharger .txt ({validCount})
+              </button>
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                disabled={validCount === 0}
+                className="rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm font-medium hover:bg-[color:var(--muted)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                Télécharger .csv ({validCount})
+              </button>
+            </div>
+          </div>
           <div className="mt-3 overflow-x-auto rounded-lg border border-[color:var(--border)]">
             <table className="w-full text-sm">
               <thead className="bg-[color:var(--muted)] text-left">
