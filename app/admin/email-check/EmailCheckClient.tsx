@@ -129,9 +129,6 @@ export default function EmailCheckClient() {
             <Stat label="Jetables" value={response.summary.disposable} />
             <Stat label="Génériques" value={response.summary.role_based} />
             <Stat label="Doublons" value={response.summary.duplicate} />
-            {response.runId ? (
-              <Stat label="Run ID" value={response.runId.slice(0, 8)} />
-            ) : null}
           </dl>
           {response.summary.valid > 0 ? (
             <button
