@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import {
   validateEmailsAction,
@@ -35,9 +35,9 @@ function parseInput(raw: string): string[] {
 
 export default function EmailCheckClient() {
   const [text, setText] = useState("");
-  const [label, setLabel] = useState("");
   const [response, setResponse] = useState<ValidateEmailsResponse | null>(null);
   const [isPending, startTransition] = useTransition();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const emails = useMemo(() => parseInput(text), [text]);
 
@@ -48,10 +48,7 @@ export default function EmailCheckClient() {
     }
 
     startTransition(async () => {
-      const res = await validateEmailsAction({
-        emails,
-        campaignLabel: label.trim() || undefined,
-      });
+      const res = await validateEmailsAction({ emails });
       setResponse(res);
       if (res.ok) {
         toast.success(`Validation terminée — ${res.summary?.valid ?? 0} valides`);
@@ -59,6 +56,43 @@ export default function EmailCheckClient() {
         toast.error(res.error ?? "Échec de la validation");
       }
     });
+  };
+
+  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const name = file.name.toLowerCase();
+    if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+      toast.error("Les fichiers Excel ne sont pas pris en charge. Exportez-les en CSV (UTF-8).");
+      e.target.value = "";
+      return;
+    }
+
+    try {
+      const raw = await file.text();
+      const content = raw.replace(/^﻿/, "");
+      const extracted = parseInput(content).filter((t) => t.includes("@"));
+
+      if (extracted.length === 0) {
+        toast.error("Aucune adresse email détectée dans le fichier.");
+        return;
+      }
+
+      setText((prev) => {
+        const joined = extracted.join("\n");
+        return prev.trim() ? `${prev.trimEnd()}\n${joined}` : joined;
+      });
+      toast.success(
+        `${extracted.length} adresse${extracted.length > 1 ? "s" : ""} importée${
+          extracted.length > 1 ? "s" : ""
+        } depuis ${file.name}`
+      );
+    } catch {
+      toast.error("Impossible de lire le fichier.");
+    } finally {
+      e.target.value = "";
+    }
   };
 
   const validEmails = useMemo(
@@ -98,20 +132,24 @@ export default function EmailCheckClient() {
   return (
     <div className="space-y-6">
       <section className="space-y-3">
-        <label className="block text-sm font-medium">
-          Libellé de campagne (optionnel)
-          <input
-            type="text"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="ex. Newsletter avril 2026"
-            className="mt-1 w-full rounded-md border border-[color:var(--border)] bg-[color:var(--background)] px-3 py-2 text-sm outline-none focus:border-[color:var(--primary)]"
-            maxLength={200}
-          />
-        </label>
-
-        <label className="block text-sm font-medium">
-          Liste d&apos;emails
+        <div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium">Liste d&apos;emails</span>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm font-medium hover:bg-[color:var(--muted)]"
+            >
+              Importer un fichier CSV
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.txt,text/csv,text/plain"
+              onChange={handleFileImport}
+              className="hidden"
+            />
+          </div>
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -119,7 +157,7 @@ export default function EmailCheckClient() {
             rows={10}
             className="mt-1 w-full rounded-md border border-[color:var(--border)] bg-[color:var(--background)] px-3 py-2 font-mono text-sm outline-none focus:border-[color:var(--primary)]"
           />
-        </label>
+        </div>
 
         <div className="flex items-center gap-3">
           <button

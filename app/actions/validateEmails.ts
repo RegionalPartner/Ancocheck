@@ -12,7 +12,6 @@ const InputSchema = z.object({
     .array(z.string().min(1).max(320))
     .min(1, "Au moins une adresse est requise")
     .max(10_000, "Limite de 10 000 adresses par lot"),
-  campaignLabel: z.string().max(200).optional(),
 });
 
 export interface ValidateEmailsResponse {
