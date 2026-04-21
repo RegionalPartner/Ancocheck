@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   validateEmails as runValidation,
   summarize,
+  type EmailStatus,
   type EmailValidationResult,
 } from "@/lib/email-validation";
 import {
@@ -13,34 +14,40 @@ import {
   validateWithZeroBounce,
 } from "@/lib/zerobounce";
 
-const InputSchema = z.object({
-  emails: z
-    .array(z.string().min(1).max(320))
-    .min(1, "Au moins une adresse est requise")
-    .max(10_000, "Limite de 10 000 adresses par lot"),
-});
+const EmailsSchema = z
+  .array(z.string().min(1).max(320))
+  .min(1, "Au moins une adresse est requise")
+  .max(10_000, "Limite de 10 000 adresses par lot");
 
-export interface ValidateEmailsResponse {
+export interface Step1Response {
   ok: boolean;
   error?: string;
-  mode?: "pass1" | "pass2";
   results?: EmailValidationResult[];
   summary?: ReturnType<typeof summarize>;
+}
+
+export interface Step2Update {
+  normalized: string;
+  status: EmailStatus;
+  reason?: string;
+  didYouMean?: string;
+}
+
+export interface Step2Response {
+  ok: boolean;
+  error?: string;
+  updates?: Step2Update[];
   creditsConsumed?: number;
   creditsRemaining?: number | null;
 }
 
-export async function validateEmailsAction(
-  input: z.infer<typeof InputSchema>
-): Promise<ValidateEmailsResponse> {
-  const parsed = InputSchema.safeParse(input);
+export async function runStep1(emails: string[]): Promise<Step1Response> {
+  const parsed = EmailsSchema.safeParse(emails);
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues.map((i) => i.message).join("; ") };
   }
-
-  const results = await runValidation(parsed.data.emails);
-  const summary = summarize(results);
-  return { ok: true, mode: "pass1", results, summary };
+  const results = await runValidation(parsed.data);
+  return { ok: true, results, summary: summarize(results) };
 }
 
 async function runWithConcurrency<T, R>(
@@ -62,14 +69,7 @@ async function runWithConcurrency<T, R>(
   return results;
 }
 
-export async function validateEmailsDeepAction(
-  input: z.infer<typeof InputSchema>
-): Promise<ValidateEmailsResponse> {
-  const parsed = InputSchema.safeParse(input);
-  if (!parsed.success) {
-    return { ok: false, error: parsed.error.issues.map((i) => i.message).join("; ") };
-  }
-
+export async function runStep2(validEmails: string[]): Promise<Step2Response> {
   if (!hasZeroBounceKey()) {
     return {
       ok: false,
@@ -78,45 +78,31 @@ export async function validateEmailsDeepAction(
     };
   }
 
-  const pass1 = await runValidation(parsed.data.emails);
-
-  const candidateIndexes: number[] = [];
-  pass1.forEach((r, i) => {
-    if (r.status === "valid") candidateIndexes.push(i);
-  });
+  const parsed = EmailsSchema.safeParse(validEmails);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues.map((i) => i.message).join("; ") };
+  }
 
   let creditsConsumed = 0;
-
-  await runWithConcurrency(candidateIndexes, 5, async (idx) => {
-    const r = pass1[idx];
+  const updates = await runWithConcurrency(parsed.data, 5, async (email) => {
     try {
-      const zb = await validateWithZeroBounce(r.normalized);
+      const zb = await validateWithZeroBounce(email);
       creditsConsumed++;
-      const mapped = mapZeroBounceStatus(zb);
-      pass1[idx] = {
-        ...r,
-        status: mapped,
+      return {
+        normalized: email,
+        status: mapZeroBounceStatus(zb),
         reason: zb.sub_status ? `${zb.status} / ${zb.sub_status}` : zb.status,
         didYouMean: zb.did_you_mean,
-      };
+      } satisfies Step2Update;
     } catch (e) {
-      pass1[idx] = {
-        ...r,
-        status: "risky",
+      return {
+        normalized: email,
+        status: "risky" as const,
         reason: `ZeroBounce injoignable: ${e instanceof Error ? e.message : String(e)}`,
-      };
+      } satisfies Step2Update;
     }
   });
 
   const creditsRemaining = await getCreditsRemaining();
-  const summary = summarize(pass1);
-
-  return {
-    ok: true,
-    mode: "pass2",
-    results: pass1,
-    summary,
-    creditsConsumed,
-    creditsRemaining,
-  };
+  return { ok: true, updates, creditsConsumed, creditsRemaining };
 }
