@@ -2,8 +2,7 @@
 
 Outil interne de validation d'adresses email avant envoi de campagnes.
 Vérifie syntaxe, domaines jetables, adresses génériques et présence
-d'enregistrements MX. Toute la validation se fait en mémoire côté serveur,
-sans persistance.
+d'enregistrements MX.
 
 Stack : **Next.js 16** (App Router) · **React 19** · **TypeScript** ·
 **Tailwind v4** · **shadcn/ui** (tokens prêts) · **sonner**.
@@ -46,9 +45,8 @@ L'URL racine redirige vers `/admin/email-check`.
    - `role_based` — préfixe générique (`info@`, `contact@`, …)
    - `no_mx` — domaine sans enregistrement MX ni A
    - `duplicate` — déjà présent plus haut dans la liste
-5. Exporte les adresses valides en `.txt` si besoin
-
-Les résultats sont retournés directement à la page et ne sont pas persistés.
+5. Exporte les adresses valides en `.txt` ou `.csv` (UTF-8 avec BOM,
+   compatible Excel) si besoin
 
 ## Structure
 

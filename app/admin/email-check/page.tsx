@@ -13,9 +13,10 @@ export default function EmailCheckPage() {
         </h1>
         <p className="mt-2 text-sm text-[color:var(--muted-foreground)]">
           Collez une liste d&apos;adresses (une par ligne, ou séparées par des
-          virgules/points-virgules) avant envoi de campagne. Les doublons, les
-          domaines jetables, les adresses génériques et les domaines sans MX
-          sont détectés et journalisés dans Supabase.
+          virgules/points-virgules) pour vérifier leur validité avant l&apos;envoi
+          d&apos;une campagne. Les doublons, domaines jetables, adresses
+          génériques (type contact@, noreply@) et domaines sans MX sont détectés
+          automatiquement.
         </p>
       </header>
       <EmailCheckClient />
