@@ -6,7 +6,10 @@ export type EmailStatus =
   | "disposable"
   | "role_based"
   | "no_mx"
-  | "duplicate";
+  | "duplicate"
+  | "verified_deliverable"
+  | "risky"
+  | "undeliverable_smtp";
 
 export interface EmailValidationResult {
   email: string;
@@ -14,6 +17,7 @@ export interface EmailValidationResult {
   status: EmailStatus;
   reason?: string;
   mxFound?: boolean;
+  didYouMean?: string;
 }
 
 // RFC 5322-ish practical regex — avoids catastrophic backtracking.
@@ -197,6 +201,9 @@ export function summarize(results: EmailValidationResult[]) {
     role_based: 0,
     no_mx: 0,
     duplicate: 0,
+    verified_deliverable: 0,
+    risky: 0,
+    undeliverable_smtp: 0,
   };
   for (const r of results) counts[r.status]++;
   return { total, ...counts };

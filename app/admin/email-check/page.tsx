@@ -1,10 +1,14 @@
 import EmailCheckClient from "./EmailCheckClient";
+import { hasZeroBounceKey } from "@/lib/zerobounce";
 
 export const metadata = {
   title: "Validation d'emails — Ancocheck",
 };
 
+export const dynamic = "force-dynamic";
+
 export default function EmailCheckPage() {
+  const deepEnabled = hasZeroBounceKey();
   return (
     <main className="mx-auto max-w-4xl px-6 py-10">
       <header className="mb-8">
@@ -19,7 +23,7 @@ export default function EmailCheckPage() {
           automatiquement.
         </p>
       </header>
-      <EmailCheckClient />
+      <EmailCheckClient deepEnabled={deepEnabled} />
     </main>
   );
 }
