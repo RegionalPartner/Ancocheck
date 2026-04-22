@@ -1,12 +1,22 @@
 "use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { runStep1, runStep2, type Step2Update } from "@/app/actions/validateEmails";
+import {
+  runStep1,
+  runStep2,
+  type Step1Response,
+  type Step2Response,
+  type Step2Update,
+} from "@/app/actions/validateEmails";
 import type {
   EmailStatus,
   EmailValidationResult,
 } from "@/lib/email-validation";
+
+const CHUNK_SIZE_STEP1 = 2000;
+const CHUNK_SIZE_STEP2 = 100;
+const STEP2_CONFIRM_THRESHOLD = 50;
 
 const STATUS_KEYS: EmailStatus[] = [
   "valid",
@@ -18,16 +28,8 @@ const STATUS_KEYS: EmailStatus[] = [
   "verified_deliverable",
   "risky",
   "undeliverable_smtp",
+  "error",
 ];
-
-function summarize(results: EmailValidationResult[]) {
-  const counts = Object.fromEntries(STATUS_KEYS.map((k) => [k, 0])) as Record<
-    EmailStatus,
-    number
-  >;
-  for (const r of results) counts[r.status]++;
-  return { total: results.length, ...counts };
-}
 
 const STATUS_LABELS: Record<EmailStatus, string> = {
   valid: "Valide",
@@ -39,6 +41,7 @@ const STATUS_LABELS: Record<EmailStatus, string> = {
   verified_deliverable: "Vérifié ✓✓",
   risky: "À risque ⚠️",
   undeliverable_smtp: "Non délivrable",
+  error: "Erreur",
 };
 
 const STATUS_CLASSES: Record<EmailStatus, string> = {
@@ -52,7 +55,17 @@ const STATUS_CLASSES: Record<EmailStatus, string> = {
     "bg-emerald-700 text-emerald-50 dark:bg-emerald-600 dark:text-emerald-50",
   risky: "bg-orange-200 text-orange-950 dark:bg-orange-800/60 dark:text-orange-50",
   undeliverable_smtp: "bg-red-200 text-red-950 dark:bg-red-900/60 dark:text-red-50",
+  error: "bg-zinc-300 text-zinc-900 dark:bg-zinc-600 dark:text-zinc-100",
 };
+
+function summarize(results: EmailValidationResult[]) {
+  const counts = Object.fromEntries(STATUS_KEYS.map((k) => [k, 0])) as Record<
+    EmailStatus,
+    number
+  >;
+  for (const r of results) counts[r.status]++;
+  return { total: results.length, ...counts };
+}
 
 function parseInput(raw: string): string[] {
   return raw
@@ -66,6 +79,27 @@ function csvEscape(s: string): string {
   return s;
 }
 
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function retryOnce<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch {
+    return await fn();
+  }
+}
+
+interface Progress {
+  label: string;
+  processed: number;
+  total: number;
+  unit?: string;
+}
+
 interface EmailCheckClientProps {
   deepEnabled: boolean;
 }
@@ -76,9 +110,11 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
   const [step2Done, setStep2Done] = useState(false);
   const [creditsConsumed, setCreditsConsumed] = useState<number | null>(null);
   const [creditsRemaining, setCreditsRemaining] = useState<number | null>(null);
-  const [isStep1Pending, startStep1Transition] = useTransition();
-  const [isStep2Pending, startStep2Transition] = useTransition();
+  const [isStep1Pending, setIsStep1Pending] = useState(false);
+  const [isStep2Pending, setIsStep2Pending] = useState(false);
+  const [progress, setProgress] = useState<Progress | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cancelRef = useRef(false);
 
   const emails = useMemo(() => parseInput(text), [text]);
 
@@ -87,6 +123,7 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
     setStep2Done(false);
     setCreditsConsumed(null);
     setCreditsRemaining(null);
+    setProgress(null);
   };
 
   const updateText = (next: string) => {
@@ -94,30 +131,84 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
     if (step1Results !== null || step2Done) resetRun();
   };
 
-  const handleStep1 = () => {
+  const handleCancel = () => {
+    cancelRef.current = true;
+  };
+
+  const handleStep1 = async () => {
     if (emails.length === 0) {
       toast.error("Collez au moins une adresse email.");
       return;
     }
-    startStep1Transition(async () => {
-      const res = await runStep1(emails);
-      if (!res.ok) {
-        toast.error(res.error ?? "Échec de l'étape 1");
-        return;
+    cancelRef.current = false;
+    setIsStep1Pending(true);
+    setStep1Results([]);
+    setStep2Done(false);
+    setCreditsConsumed(null);
+    setCreditsRemaining(null);
+
+    const chunks = chunk(emails, CHUNK_SIZE_STEP1);
+    const accumulated: EmailValidationResult[] = [];
+    let processed = 0;
+    let errorCount = 0;
+
+    setProgress({ label: "Vérification rapide", processed: 0, total: emails.length });
+
+    for (const c of chunks) {
+      if (cancelRef.current) break;
+
+      let res: Step1Response | null = null;
+      try {
+        res = await retryOnce(() => runStep1(c));
+      } catch {
+        res = null;
       }
-      setStep1Results(res.results ?? []);
-      setStep2Done(false);
-      setCreditsConsumed(null);
-      setCreditsRemaining(null);
+
+      if (res?.ok && res.results) {
+        accumulated.push(...res.results);
+      } else {
+        errorCount += c.length;
+        for (const raw of c) {
+          accumulated.push({
+            email: raw,
+            normalized: raw.trim().toLowerCase(),
+            status: "error",
+            reason: res?.error ?? "Appel serveur en échec",
+          });
+        }
+      }
+
+      processed += c.length;
+      setStep1Results([...accumulated]);
+      setProgress({
+        label: "Vérification rapide",
+        processed,
+        total: emails.length,
+      });
+    }
+
+    const cancelled = cancelRef.current;
+    setProgress(null);
+    setIsStep1Pending(false);
+
+    if (cancelled) {
+      toast.info(`Étape 1 annulée — ${processed} / ${emails.length} adresses traitées`);
+    } else {
+      const valid = accumulated.filter((r) => r.status === "valid").length;
       toast.success(
-        `Étape 1 terminée — ${res.summary?.valid ?? 0} adresse${
-          (res.summary?.valid ?? 0) > 1 ? "s" : ""
-        } à confirmer`
+        `Étape 1 terminée — ${valid} adresse${valid > 1 ? "s" : ""} à confirmer`
       );
-    });
+    }
+    if (errorCount > 0) {
+      toast.error(
+        `${errorCount} adresse${errorCount > 1 ? "s" : ""} n'${
+          errorCount > 1 ? "ont" : "a"
+        } pas pu être vérifiée${errorCount > 1 ? "s" : ""}, réessayez plus tard`
+      );
+    }
   };
 
-  const handleStep2 = () => {
+  const handleStep2 = async () => {
     if (!step1Results) return;
     const candidates = step1Results
       .filter((r) => r.status === "valid")
@@ -126,33 +217,98 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
       toast.error("Aucune adresse valide à confirmer.");
       return;
     }
-    startStep2Transition(async () => {
-      const res = await runStep2(candidates);
-      if (!res.ok) {
-        toast.error(res.error ?? "Échec de l'étape 2");
-        return;
+    if (candidates.length > STEP2_CONFIRM_THRESHOLD) {
+      const ok = window.confirm(
+        `Vous vous apprêtez à consommer ${candidates.length} crédits ZeroBounce. Continuer ?`
+      );
+      if (!ok) return;
+    }
+
+    cancelRef.current = false;
+    setIsStep2Pending(true);
+    setProgress({
+      label: "Confirmation SMTP",
+      processed: 0,
+      total: candidates.length,
+      unit: "crédits",
+    });
+
+    const chunks = chunk(candidates, CHUNK_SIZE_STEP2);
+    const updatesByEmail = new Map<string, Step2Update>();
+    let processed = 0;
+    let totalConsumed = 0;
+    let lastRemaining: number | null = null;
+    let errorCount = 0;
+
+    for (const c of chunks) {
+      if (cancelRef.current) break;
+
+      let res: Step2Response | null = null;
+      try {
+        res = await retryOnce(() => runStep2(c));
+      } catch {
+        res = null;
       }
-      const byEmail = new Map<string, Step2Update>();
-      for (const u of res.updates ?? []) byEmail.set(u.normalized, u);
+
+      if (res?.ok && res.updates) {
+        for (const u of res.updates) updatesByEmail.set(u.normalized, u);
+        totalConsumed += res.creditsConsumed ?? 0;
+        if (typeof res.creditsRemaining === "number") lastRemaining = res.creditsRemaining;
+      } else {
+        errorCount += c.length;
+        for (const email of c) {
+          updatesByEmail.set(email, {
+            normalized: email,
+            status: "error",
+            reason: res?.error ?? "Appel ZeroBounce en échec",
+          });
+        }
+      }
+
+      processed += c.length;
       setStep1Results((prev) =>
         prev
           ? prev.map((r) => {
-              const u = byEmail.get(r.normalized);
+              const u = updatesByEmail.get(r.normalized);
               return u
                 ? { ...r, status: u.status, reason: u.reason, didYouMean: u.didYouMean }
                 : r;
             })
           : prev
       );
-      setStep2Done(true);
-      setCreditsConsumed(res.creditsConsumed ?? 0);
-      setCreditsRemaining(res.creditsRemaining ?? null);
-      toast.success(
-        `ZeroBounce terminé — ${res.creditsConsumed ?? 0} crédit${
-          (res.creditsConsumed ?? 0) > 1 ? "s" : ""
-        } consommé${(res.creditsConsumed ?? 0) > 1 ? "s" : ""}`
+      setCreditsConsumed(totalConsumed);
+      setCreditsRemaining(lastRemaining);
+      setProgress({
+        label: "Confirmation SMTP",
+        processed,
+        total: candidates.length,
+        unit: "crédits",
+      });
+    }
+
+    const cancelled = cancelRef.current;
+    setProgress(null);
+    setIsStep2Pending(false);
+    setStep2Done(!cancelled);
+
+    if (cancelled) {
+      toast.info(
+        `Étape 2 annulée — ${processed} / ${candidates.length} adresses traitées`
       );
-    });
+    } else {
+      toast.success(
+        `ZeroBounce terminé — ${totalConsumed} crédit${totalConsumed > 1 ? "s" : ""} consommé${
+          totalConsumed > 1 ? "s" : ""
+        }`
+      );
+    }
+    if (errorCount > 0) {
+      toast.error(
+        `${errorCount} adresse${errorCount > 1 ? "s" : ""} n'${
+          errorCount > 1 ? "ont" : "a"
+        } pas pu être vérifiée${errorCount > 1 ? "s" : ""}, réessayez plus tard`
+      );
+    }
   };
 
   const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -190,15 +346,12 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
     }
   };
 
-  const step1Done = step1Results !== null;
+  const step1Done = step1Results !== null && !isStep1Pending;
   const step2Candidates = useMemo(
     () => (step1Results ? step1Results.filter((r) => r.status === "valid").length : 0),
     [step1Results]
   );
-
-  const step1Busy = isStep1Pending;
-  const step2Busy = isStep2Pending;
-  const anyBusy = step1Busy || step2Busy;
+  const anyBusy = isStep1Pending || isStep2Pending;
 
   const step1Disabled = anyBusy || emails.length === 0;
 
@@ -219,7 +372,7 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
   }
 
   const summary = useMemo(
-    () => (step1Results ? summarize(step1Results) : null),
+    () => (step1Results && step1Results.length > 0 ? summarize(step1Results) : null),
     [step1Results]
   );
 
@@ -261,6 +414,10 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
     downloadBlob(blob, `emails-valides-${timestamp()}.csv`);
   };
 
+  const progressPct = progress
+    ? Math.min(100, Math.round((progress.processed / Math.max(1, progress.total)) * 100))
+    : 0;
+
   return (
     <div className="space-y-6">
       <section className="space-y-4">
@@ -270,7 +427,8 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm font-medium hover:bg-[color:var(--muted)]"
+              disabled={anyBusy}
+              className="rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm font-medium hover:bg-[color:var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
             >
               Importer un fichier CSV
             </button>
@@ -287,7 +445,8 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
             onChange={(e) => updateText(e.target.value)}
             placeholder={"alice@example.com\nbob@domain.fr\n..."}
             rows={10}
-            className="mt-1 w-full rounded-md border border-[color:var(--border)] bg-[color:var(--background)] px-3 py-2 font-mono text-sm outline-none focus:border-[color:var(--primary)]"
+            disabled={anyBusy}
+            className="mt-1 w-full rounded-md border border-[color:var(--border)] bg-[color:var(--background)] px-3 py-2 font-mono text-sm outline-none focus:border-[color:var(--primary)] disabled:opacity-60"
           />
           <p className="mt-1 text-xs text-[color:var(--muted-foreground)]">
             {emails.length} adresse{emails.length > 1 ? "s" : ""} détectée
@@ -307,7 +466,7 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
                 : "bg-[color:var(--primary)] text-[color:var(--primary-foreground)] hover:opacity-90",
             ].join(" ")}
           >
-            {step1Busy
+            {isStep1Pending
               ? "Étape 1 en cours…"
               : step1Done
                 ? "Étape 1 ✓ terminée"
@@ -327,7 +486,7 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
                   : "bg-orange-600 text-white hover:bg-orange-700 disabled:hover:bg-orange-600 dark:bg-orange-500 dark:hover:bg-orange-600",
               ].join(" ")}
             >
-              {step2Busy
+              {isStep2Pending
                 ? "Étape 2 en cours…"
                 : step2Done
                   ? "Étape 2 ✓ terminée"
@@ -345,6 +504,31 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
             </p>
           </div>
         </div>
+
+        {progress ? (
+          <div className="space-y-2 rounded-lg border border-[color:var(--border)] p-3">
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span>
+                {progress.label} : {progress.processed.toLocaleString("fr-FR")} /{" "}
+                {progress.total.toLocaleString("fr-FR")}
+                {progress.unit ? ` ${progress.unit}` : ""} ({progressPct}%)
+              </span>
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="rounded-md border border-[color:var(--border)] px-3 py-1 text-xs font-medium hover:bg-[color:var(--muted)]"
+              >
+                Annuler
+              </button>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-[color:var(--muted)]">
+              <div
+                className="h-full transition-all"
+                style={{ width: `${progressPct}%`, backgroundColor: "#ff645f" }}
+              />
+            </div>
+          </div>
+        ) : null}
       </section>
 
       {summary ? (
@@ -366,16 +550,19 @@ export default function EmailCheckClient({ deepEnabled }: EmailCheckClientProps)
             <Stat label="Jetables" value={summary.disposable} />
             <Stat label="Génériques" value={summary.role_based} />
             <Stat label="Doublons" value={summary.duplicate} />
+            {summary.error > 0 ? (
+              <Stat label="Erreurs" value={summary.error} />
+            ) : null}
           </dl>
         </section>
       ) : null}
 
-      {step1Results ? (
+      {step1Results && step1Results.length > 0 ? (
         <section>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-col gap-1">
               <h2 className="text-lg font-semibold">Détails</h2>
-              {step2Done ? (
+              {step2Done || creditsConsumed !== null ? (
                 <p className="text-xs text-[color:var(--muted-foreground)]">
                   {creditsConsumed ?? 0} crédit{(creditsConsumed ?? 0) > 1 ? "s" : ""}{" "}
                   ZeroBounce consommé{(creditsConsumed ?? 0) > 1 ? "s" : ""}

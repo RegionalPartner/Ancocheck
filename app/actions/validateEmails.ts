@@ -14,10 +14,15 @@ import {
   validateWithZeroBounce,
 } from "@/lib/zerobounce";
 
+const MAX_EMAILS_PER_REQUEST = 2000;
+
 const EmailsSchema = z
   .array(z.string().min(1).max(320))
   .min(1, "Au moins une adresse est requise")
-  .max(10_000, "Limite de 10 000 adresses par lot");
+  .max(
+    MAX_EMAILS_PER_REQUEST,
+    `Limite de ${MAX_EMAILS_PER_REQUEST} adresses par appel — découpez le lot côté client`
+  );
 
 export interface Step1Response {
   ok: boolean;

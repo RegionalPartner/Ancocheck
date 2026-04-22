@@ -9,7 +9,8 @@ export type EmailStatus =
   | "duplicate"
   | "verified_deliverable"
   | "risky"
-  | "undeliverable_smtp";
+  | "undeliverable_smtp"
+  | "error";
 
 export interface EmailValidationResult {
   email: string;
@@ -204,6 +205,7 @@ export function summarize(results: EmailValidationResult[]) {
     verified_deliverable: 0,
     risky: 0,
     undeliverable_smtp: 0,
+    error: 0,
   };
   for (const r of results) counts[r.status]++;
   return { total, ...counts };
